@@ -4,14 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Copiloto - Asistente Visual</title>
-  <!-- Carga de ONNX Runtime Web desde CDN -->
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
     
     body {
       background-color: #000;
@@ -23,7 +18,7 @@
     #video-container {
       position: relative;
       width: 100vw;
-      height: 70vh;
+      height: 60vh;
       overflow: hidden;
       background-color: #1a1a1a;
     }
@@ -37,37 +32,31 @@
       object-fit: cover;
     }
     
-    canvas {
-      display: none;
-    }
+    canvas { display: none; }
     
     #controls {
-      height: 30vh;
+      height: 40vh;
       display: flex;
       flex-direction: column;
       justify-content: center;
       align-items: center;
-      gap: 20px;
+      gap: 15px;
       padding: 20px;
       background-color: #0a0a0a;
+      overflow-y: auto;
     }
     
     button {
       width: 90%;
       max-width: 400px;
-      height: 70px;
-      font-size: 1.2rem;
+      height: 60px;
+      font-size: 1.1rem;
       font-weight: bold;
       background-color: #28a745;
       color: white;
       border: none;
       border-radius: 10px;
       cursor: pointer;
-      transition: background-color 0.3s;
-    }
-    
-    button:hover:not(:disabled) {
-      background-color: #218838;
     }
     
     button:disabled {
@@ -76,23 +65,24 @@
     }
     
     #status {
-      font-size: 1.2rem;
+      font-size: 1.1rem;
       color: #ffc107;
-      min-height: 30px;
       font-weight: bold;
     }
     
-    #detection-log {
-      font-size: 0.9rem;
-      color: #87ceeb;
-      max-height: 80px;
-      overflow-y: auto;
-      width: 90%;
-      max-width: 400px;
-      background-color: #1a1a1a;
+    #debug-log {
+      font-size: 0.75rem;
+      color: #00ff00;
+      background-color: #111;
       padding: 10px;
+      border: 1px solid #00ff00;
       border-radius: 5px;
+      width: 95%;
+      max-width: 500px;
+      max-height: 150px;
+      overflow-y: auto;
       text-align: left;
+      font-family: monospace;
     }
   </style>
 </head>
@@ -106,7 +96,7 @@
     <div id="status">Inicializando...</div>
     <button id="btn-start" onclick="iniciarCopiloto()">INICIAR</button>
     <button id="btn-stop" onclick="detenerCopiloto()" disabled>DETENER</button>
-    <div id="detection-log"></div>
+    <div id="debug-log"></div>
   </div>
 
   <script>
@@ -115,148 +105,85 @@
     const canvas = document.getElementById('output-canvas');
     const ctx = canvas.getContext('2d');
     const statusText = document.getElementById('status');
-    const detectionLog = document.getElementById('detection-log');
+    const debugLog = document.getElementById('debug-log');
     const btnStart = document.getElementById('btn-start');
     const btnStop = document.getElementById('btn-stop');
     
-    let lastSpokenTime = 0;
-    let lastSpokenText = "";
     let isRunning = false;
     let frameCount = 0;
-    let processingFrame = false;
-    let lastDetectionTime = 0;
-    let totalDetections = 0;
+    const logs = [];
 
-    // Nombres de clases COCO en español (80 clases)
-    const classNames = [
-      'persona', 'bicicleta', 'coche', 'moto', 'autobús',
-      'tren', 'camión', 'bote', 'semáforo', 'boca de riego',
-      'señal de stop', 'parquímetro', 'banco', 'pájaro', 'gato',
-      'perro', 'caballo', 'oveja', 'vaca', 'elefante',
-      'oso', 'cebra', 'jirafa', 'mochila', 'paraguas',
-      'bolsa', 'corbata', 'maleta', 'disco volador', 'esquís',
-      'tabla de esquí', 'tabla de deportes acuáticos', 'tabla de surf', 'botella de tenis', 'taza',
-      'tenedor', 'cuchillo', 'cuchara', 'cuenco', 'plátano',
-      'manzana', 'sándwich', 'naranja', 'brócoli', 'zanahoria',
-      'perrito caliente', 'pizza', 'donut', 'pastel', 'silla',
-      'sofá', 'planta en maceta', 'cama', 'mesa de comedor', 'váter',
-      'televisión', 'portátil', 'ratón', 'teclado', 'microondas',
-      'horno', 'tostadora', 'fregadero', 'refrigerador', 'libro',
-      'reloj', 'florero', 'tijeras', 'oso de peluche', 'secador de pelo',
-      'cepillo de dientes', 'monopatín', 'pelota de surf', 'muñeca de acción', 'piscina'
-    ];
-
-    // Síntesis de voz
-    function hablar(texto) {
-      const now = Date.now();
-      if (texto === lastSpokenText && (now - lastSpokenTime) < 2000) return;
-
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(texto);
-      utterance.lang = 'es-ES';
-      utterance.rate = 1.0;
-      utterance.pitch = 1.0;
-      window.speechSynthesis.speak(utterance);
-
-      lastSpokenText = texto;
-      lastSpokenTime = now;
-    }
-
-    // Actualizar log de detecciones
-    function actualizarLog(texto) {
+    function addLog(msg) {
       const timestamp = new Date().toLocaleTimeString();
-      const logEntry = document.createElement('div');
-      logEntry.innerHTML = `${timestamp}: ${texto}`;
-      detectionLog.insertBefore(logEntry, detectionLog.firstChild);
-      
-      // Mantener solo los últimos 5
-      while (detectionLog.children.length > 5) {
-        detectionLog.removeChild(detectionLog.lastChild);
-      }
+      logs.push(`[${timestamp}] ${msg}`);
+      debugLog.innerHTML = logs.slice(-10).map(l => l.replace(/</g, '&lt;').replace(/>/g, '&gt;')).join('<br>');
+      debugLog.scrollTop = debugLog.scrollHeight;
+      console.log(msg);
     }
 
     async function iniciarCopiloto() {
       if (isRunning) return;
       
       statusText.innerText = "Iniciando cámara...";
-      hablar("Iniciando copiloto visual");
       btnStart.disabled = true;
+      logs.length = 0;
+      addLog("🟡 Solicitando acceso a cámara...");
 
       try {
-        // Acceder a la cámara
-        const constraints = {
-          video: { 
-            facingMode: { ideal: "environment" },
-            width: { ideal: 640 },
-            height: { ideal: 480 }
-          },
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
           audio: false
-        };
-
-        const stream = await navigator.mediaDevices.getUserMedia(constraints)
-          .catch(() => navigator.mediaDevices.getUserMedia({ video: true, audio: false }));
+        }).catch(() => navigator.mediaDevices.getUserMedia({ video: true }));
         
         video.srcObject = stream;
+        addLog("✓ Cámara conectada");
         
-        // Esperar a que el video esté listo
         await new Promise((resolve) => {
-          const checkVideo = () => {
-            if (video.videoWidth > 0) {
-              video.play();
-              resolve();
-            } else {
-              setTimeout(checkVideo, 100);
-            }
+          video.onloadedmetadata = () => {
+            video.play();
+            addLog(`✓ Video iniciado: ${video.videoWidth}x${video.videoHeight}`);
+            resolve();
           };
-          setTimeout(resolve, 3000); // Timeout de seguridad
-          checkVideo();
+          setTimeout(resolve, 3000);
         });
 
         canvas.width = video.videoWidth || 640;
         canvas.height = video.videoHeight || 480;
 
-        statusText.innerText = "Cargando modelo IA...";
-        actualizarLog("Cargando modelo YOLOv8...");
+        statusText.innerText = "Cargando modelo...";
+        addLog("🟡 Cargando YOLOv8...");
         
-        // Cargar modelo ONNX
         try {
           session = await ort.InferenceSession.create('./yolov8n.onnx', {
             executionProviders: ['wasm'],
           });
 
-          console.log("Modelo cargado. Nombres entrada:", session.inputNames);
-          console.log("Nombres salida:", session.outputNames);
+          addLog(`✓ Modelo cargado`);
+          addLog(`Input: ${session.inputNames[0]}`);
+          addLog(`Output: ${session.outputNames[0]}`);
 
           isRunning = true;
           frameCount = 0;
-          totalDetections = 0;
           statusText.innerText = "✓ SISTEMA ACTIVO";
-          hablar("Sistema listo, escaneando el camino");
           btnStop.disabled = false;
-          actualizarLog("Modelo listo. Iniciando detección...");
+          addLog("✓ Iniciando detección...");
 
-          // Iniciar procesamiento
           procesarCamara();
         } catch (modelErr) {
-          statusText.innerText = "Error modelo: " + modelErr.message;
-          console.error("Error modelo:", modelErr);
-          actualizarLog("Error al cargar modelo");
+          statusText.innerText = "Error modelo";
+          addLog(`❌ ${modelErr.message}`);
           btnStart.disabled = false;
         }
       } catch (err) {
-        statusText.innerText = "Error: " + err.message;
-        console.error("Error:", err);
-        actualizarLog("Error: " + err.message.substring(0, 40));
+        statusText.innerText = "Error cámara";
+        addLog(`❌ ${err.message}`);
         btnStart.disabled = false;
       }
     }
 
     function detenerCopiloto() {
       isRunning = false;
-      if (session) {
-        session.release?.();
-        session = null;
-      }
+      if (session) session = null;
       statusText.innerText = "Detenido";
       btnStart.disabled = false;
       btnStop.disabled = true;
@@ -264,182 +191,70 @@
       if (video.srcObject) {
         video.srcObject.getTracks().forEach(track => track.stop());
       }
-      
-      hablar("Copiloto detenido");
-      actualizarLog(`Sistema detenido. Total detecciones: ${totalDetections}`);
+      addLog("Copiloto detenido");
     }
 
     async function procesarCamara() {
-      if (!isRunning || !session || processingFrame) {
-        requestAnimationFrame(procesarCamara);
-        return;
-      }
+      if (!isRunning || !session) return;
 
-      processingFrame = true;
+      frameCount++;
 
       try {
-        // Procesar cada 2 frames (más rápido)
-        frameCount++;
-        if (frameCount % 2 !== 0) {
-          processingFrame = false;
-          requestAnimationFrame(procesarCamara);
-          return;
-        }
-
-        // Dibujar video en canvas
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         
         // Preparar tensor
-        const inputTensor = prepararTensor();
-        if (!inputTensor) throw new Error("No se pudo crear tensor");
-        
-        // Inferencia
-        const feeds = {};
-        feeds[session.inputNames[0]] = inputTensor;
-        
-        const results = await session.run(feeds);
-        
-        // Procesar resultados
-        if (results && session.outputNames && session.outputNames[0]) {
-          const output = results[session.outputNames[0]];
-          if (output && output.data) {
-            analizarDetecciones(output.data, output.dims);
-          }
-        }
-
-        // Liberar memoria
-        inputTensor.dispose();
-
-      } catch (err) {
-        console.error("Error procesamiento frame", frameCount, ":", err);
-        if (frameCount % 30 === 0) {
-          actualizarLog("Error proc: " + err.message.substring(0, 25));
-        }
-      } finally {
-        processingFrame = false;
-        requestAnimationFrame(procesarCamara);
-      }
-    }
-
-    function prepararTensor() {
-      try {
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = 640;
         tempCanvas.height = 640;
         const tempCtx = tempCanvas.getContext('2d');
-        
-        // Dibujar video escalado
         tempCtx.drawImage(video, 0, 0, 640, 640);
         
         const imgData = tempCtx.getImageData(0, 0, 640, 640).data;
         const float32Data = new Float32Array(640 * 640 * 3);
 
-        // Normalizar imagen RGB (0-255 -> 0-1)
         for (let i = 0; i < 640 * 640; i++) {
-          float32Data[i] = imgData[i * 4] / 255.0;                          // R
-          float32Data[i + 640 * 640] = imgData[i * 4 + 1] / 255.0;          // G
-          float32Data[i + 2 * 640 * 640] = imgData[i * 4 + 2] / 255.0;      // B
+          float32Data[i] = imgData[i * 4] / 255.0;
+          float32Data[i + 640 * 640] = imgData[i * 4 + 1] / 255.0;
+          float32Data[i + 2 * 640 * 640] = imgData[i * 4 + 2] / 255.0;
         }
 
-        return new ort.Tensor('float32', float32Data, [1, 3, 640, 640]);
+        const inputTensor = new ort.Tensor('float32', float32Data, [1, 3, 640, 640]);
+        
+        const feeds = { [session.inputNames[0]]: inputTensor };
+        const results = await session.run(feeds);
+        
+        const outputName = session.outputNames[0];
+        const output = results[outputName];
+
+        if (frameCount === 1) {
+          addLog(`📊 Output dims: [${output.dims.join(', ')}]`);
+          addLog(`📊 Output size: ${output.data.length} valores`);
+          addLog(`📊 Primeros 10 valores: ${Array.from(output.data).slice(0, 10).map(v => v.toFixed(3)).join(', ')}`);
+        }
+
+        // Buscar valores > 0.5
+        let maxVal = 0;
+        let maxIdx = 0;
+        for (let i = 0; i < Math.min(1000, output.data.length); i++) {
+          if (output.data[i] > maxVal) {
+            maxVal = output.data[i];
+            maxIdx = i;
+          }
+        }
+
+        if (frameCount % 30 === 0) {
+          addLog(`Frame ${frameCount}: max=${maxVal.toFixed(4)} en índice ${maxIdx}`);
+        }
+
+        inputTensor.dispose();
       } catch (err) {
-        console.error("Error preparando tensor:", err);
-        return null;
+        addLog(`❌ Frame error: ${err.message}`);
       }
+
+      requestAnimationFrame(procesarCamara);
     }
 
-    function analizarDetecciones(output, dims) {
-      try {
-        // YOLOv8 output: [1, 8400, 84]
-        // 84 = 4 (x,y,w,h) + 80 (clases)
-        
-        if (!dims || dims.length < 3) {
-          console.error("Dimensiones inesperadas:", dims);
-          return;
-        }
-
-        const numPredictions = dims[1] || 8400;
-        const numValues = dims[2] || 84;
-        const numClasses = Math.min(numValues - 4, 80);
-
-        let detectadas = [];
-        let debugCount = 0;
-
-        for (let i = 0; i < numPredictions; i++) {
-          const baseIdx = i * numValues;
-          
-          // Extraer coordenadas
-          const x = output[baseIdx] || 0;
-          const y = output[baseIdx + 1] || 0;
-          const w = output[baseIdx + 2] || 0;
-          const h = output[baseIdx + 3] || 0;
-
-          // Buscar clase con máxima confianza
-          let maxScore = 0;
-          let classId = -1;
-
-          for (let c = 0; c < numClasses; c++) {
-            const score = output[baseIdx + 4 + c] || 0;
-            if (score > maxScore) {
-              maxScore = score;
-              classId = c;
-            }
-          }
-
-          // Si supera umbral y es una clase válida
-          if (maxScore > 0.35 && classId >= 0 && classId < classNames.length) {
-            const area = w * h;
-
-            if (area > 0.0001) { // Área mínima muy pequeña (normalizada)
-              detectadas.push({
-                nombre: classNames[classId],
-                confianza: (maxScore * 100).toFixed(1),
-                x: x,
-                y: y,
-                w: w,
-                h: h,
-                area: area
-              });
-
-              if (debugCount < 3) {
-                console.log(`Detección ${i}: ${classNames[classId]} (${(maxScore*100).toFixed(1)}%) area=${area.toFixed(4)}`);
-                debugCount++;
-              }
-            }
-          }
-        }
-
-        // Procesar detecciones ordenadas por área (proximidad)
-        detectadas.sort((a, b) => b.area - a.area);
-        
-        if (detectadas.length > 0 && frameCount % 15 === 0) {
-          console.log(`Total detecciones en frame ${frameCount}: ${detectadas.length}`);
-        }
-
-        if (detectadas.length > 0) {
-          const obj = detectadas[0];
-          const now = Date.now();
-          
-          // Umbral muy bajo para avisar
-          if (obj.area > 0.001 && (now - lastDetectionTime) > 1500) {
-            let posicion = "al frente";
-            if (obj.x < 0.33) posicion = "a la izquierda";
-            else if (obj.x > 0.67) posicion = "a la derecha";
-
-            const mensaje = `${obj.nombre} ${posicion}`;
-            hablar(mensaje);
-            actualizarLog(`✓ ${obj.nombre} ${posicion} (${obj.confianza}%)`);
-            lastDetectionTime = now;
-            totalDetections++;
-          }
-        }
-      } catch (err) {
-        console.error("Error analizando detecciones:", err);
-      }
-    }
-
-    // Inicializar estado
-    statusText.innerText = "Listo. Presiona INICIAR";
+    addLog("Ready. Press INICIAR");
   </script>
 </body>
 </html>
