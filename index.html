@@ -66,12 +66,8 @@
       transition: background-color 0.3s;
     }
     
-    button:hover {
+    button:hover:not(:disabled) {
       background-color: #218838;
-    }
-    
-    button:active {
-      background-color: #1e7e34;
     }
     
     button:disabled {
@@ -89,7 +85,7 @@
     #detection-log {
       font-size: 0.9rem;
       color: #87ceeb;
-      max-height: 60px;
+      max-height: 80px;
       overflow-y: auto;
       width: 90%;
       max-width: 400px;
@@ -125,7 +121,9 @@
     let lastSpokenTime = 0;
     let lastSpokenText = "";
     let isRunning = false;
-    let detectionInterval = null;
+    let frameCount = 0;
+    let processingFrame = false;
+    let lastDetectionTime = 0;
 
     // Nombres de clases COCO en español
     const classNames = {
@@ -138,12 +136,13 @@
     // Síntesis de voz
     function hablar(texto) {
       const now = Date.now();
-      if (texto === lastSpokenText && (now - lastSpokenTime) < 2000) return;
+      if (texto === lastSpokenText && (now - lastSpokenTime) < 2500) return;
 
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(texto);
       utterance.lang = 'es-ES';
       utterance.rate = 1.0;
+      utterance.pitch = 1.0;
       window.speechSynthesis.speak(utterance);
 
       lastSpokenText = texto;
@@ -153,8 +152,12 @@
     // Actualizar log de detecciones
     function actualizarLog(texto) {
       const timestamp = new Date().toLocaleTimeString();
-      detectionLog.innerHTML = `<strong>${timestamp}:</strong> ${texto}<br>` + detectionLog.innerHTML;
-      if (detectionLog.children.length > 5) {
+      const logEntry = document.createElement('div');
+      logEntry.innerHTML = `<strong>${timestamp}:</strong> ${texto}`;
+      detectionLog.insertBefore(logEntry, detectionLog.firstChild);
+      
+      // Mantener solo los últimos 5
+      while (detectionLog.children.length > 5) {
         detectionLog.removeChild(detectionLog.lastChild);
       }
     }
@@ -168,61 +171,68 @@
 
       try {
         // Acceder a la cámara
-        const stream = await navigator.mediaDevices.getUserMedia({
+        const constraints = {
           video: { 
-            facingMode: "environment",
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
+            facingMode: { ideal: "environment" },
+            width: { ideal: 640 },
+            height: { ideal: 480 }
           },
           audio: false
-        }).catch(() => {
-          return navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        });
+        };
+
+        const stream = await navigator.mediaDevices.getUserMedia(constraints)
+          .catch(() => navigator.mediaDevices.getUserMedia({ video: true, audio: false }));
         
         video.srcObject = stream;
-        video.onloadedmetadata = async () => {
-          await video.play();
-          
-          // Esperar a que el video tenga dimensiones
-          setTimeout(async () => {
-            canvas.width = video.videoWidth || 640;
-            canvas.height = video.videoHeight || 480;
+        
+        // Esperar a que el video esté listo
+        await new Promise((resolve) => {
+          video.onloadedmetadata = () => {
+            video.play();
+            resolve();
+          };
+          setTimeout(resolve, 2000); // Timeout de seguridad
+        });
 
-            statusText.innerText = "Cargando modelo IA...";
-            
-            try {
-              // Cargar modelo
-              session = await ort.InferenceSession.create('./yolov8n.onnx', {
-                executionProviders: ['wasm'],
-              });
+        canvas.width = video.videoWidth || 640;
+        canvas.height = video.videoHeight || 480;
 
-              isRunning = true;
-              statusText.innerText = "✓ SISTEMA ACTIVO";
-              hablar("Sistema listo, escaneando");
-              btnStop.disabled = false;
-              actualizarLog("Copiloto iniciado");
+        statusText.innerText = "Cargando modelo IA...";
+        
+        // Cargar modelo ONNX
+        try {
+          session = await ort.InferenceSession.create('./yolov8n.onnx', {
+            executionProviders: ['wasm'],
+          });
 
-              // Procesar cada fotograma
-              procesarCamara();
-            } catch (err) {
-              statusText.innerText = "Error modelo: " + err.message;
-              hablar("Error al cargar modelo");
-              console.error("Error modelo:", err);
-              btnStart.disabled = false;
-            }
-          }, 500);
-        };
+          isRunning = true;
+          frameCount = 0;
+          statusText.innerText = "✓ SISTEMA ACTIVO";
+          hablar("Sistema listo");
+          btnStop.disabled = false;
+          actualizarLog("Copiloto iniciado correctamente");
+
+          // Iniciar procesamiento
+          procesarCamara();
+        } catch (modelErr) {
+          statusText.innerText = "Error modelo: " + modelErr.message;
+          hablar("Error al cargar modelo");
+          console.error("Error modelo:", modelErr);
+          btnStart.disabled = false;
+        }
       } catch (err) {
-        statusText.innerText = "Error cámara: " + err.message;
-        hablar("Error al acceder a cámara");
-        console.error("Error cámara:", err);
+        statusText.innerText = "Error: " + err.message;
+        console.error("Error:", err);
         btnStart.disabled = false;
       }
     }
 
     function detenerCopiloto() {
       isRunning = false;
-      session = null;
+      if (session) {
+        session.release?.();
+        session = null;
+      }
       statusText.innerText = "Detenido";
       btnStart.disabled = false;
       btnStop.disabled = true;
@@ -236,107 +246,148 @@
     }
 
     async function procesarCamara() {
-      if (!isRunning || !session) return;
+      if (!isRunning || !session || processingFrame) {
+        requestAnimationFrame(procesarCamara);
+        return;
+      }
+
+      processingFrame = true;
 
       try {
+        // Procesar cada 3 frames (optimización)
+        frameCount++;
+        if (frameCount % 3 !== 0) {
+          processingFrame = false;
+          requestAnimationFrame(procesarCamara);
+          return;
+        }
+
         // Dibujar video en canvas
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         
         // Preparar tensor
         const inputTensor = prepararTensor();
+        if (!inputTensor) throw new Error("No se pudo crear tensor");
         
         // Inferencia
         const feeds = {};
         feeds[session.inputNames[0]] = inputTensor;
+        
         const results = await session.run(feeds);
         
         // Procesar resultados
-        const output = results[session.outputNames[0]];
-        analizarDetecciones(output.data, output.dims);
+        if (results && session.outputNames && session.outputNames[0]) {
+          const output = results[session.outputNames[0]];
+          if (output && output.data) {
+            analizarDetecciones(output.data, output.dims);
+          }
+        }
 
+        // Liberar memoria
         inputTensor.dispose();
 
-        // Siguiente fotograma
-        requestAnimationFrame(procesarCamara);
       } catch (err) {
         console.error("Error procesamiento:", err);
+        if (frameCount % 30 === 0) {
+          actualizarLog("Error: " + err.message.substring(0, 30));
+        }
+      } finally {
+        processingFrame = false;
+        requestAnimationFrame(procesarCamara);
       }
     }
 
     function prepararTensor() {
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = 640;
-      tempCanvas.height = 640;
-      const tempCtx = tempCanvas.getContext('2d');
-      
-      // Dibujar video escalado
-      tempCtx.drawImage(video, 0, 0, 640, 640);
-      
-      const imgData = tempCtx.getImageData(0, 0, 640, 640).data;
-      const float32Data = new Float32Array(640 * 640 * 3);
+      try {
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = 640;
+        tempCanvas.height = 640;
+        const tempCtx = tempCanvas.getContext('2d');
+        
+        // Dibujar video escalado
+        tempCtx.drawImage(video, 0, 0, 640, 640);
+        
+        const imgData = tempCtx.getImageData(0, 0, 640, 640).data;
+        const float32Data = new Float32Array(640 * 640 * 3);
 
-      // Normalizar imagen RGB
-      for (let i = 0; i < 640 * 640; i++) {
-        float32Data[i] = imgData[i * 4] / 255.0;                          // R
-        float32Data[i + 640 * 640] = imgData[i * 4 + 1] / 255.0;          // G
-        float32Data[i + 2 * 640 * 640] = imgData[i * 4 + 2] / 255.0;      // B
+        // Normalizar imagen RGB
+        for (let i = 0; i < 640 * 640; i++) {
+          float32Data[i] = imgData[i * 4] / 255.0;                          // R
+          float32Data[i + 640 * 640] = imgData[i * 4 + 1] / 255.0;          // G
+          float32Data[i + 2 * 640 * 640] = imgData[i * 4 + 2] / 255.0;      // B
+        }
+
+        return new ort.Tensor('float32', float32Data, [1, 3, 640, 640]);
+      } catch (err) {
+        console.error("Error preparando tensor:", err);
+        return null;
       }
-
-      return new ort.Tensor('float32', float32Data, [1, 3, 640, 640]);
     }
 
     function analizarDetecciones(output, dims) {
-      const numPredictions = dims[2] || 8400;
-      const numClasses = dims[1] - 4 || 80;
-      
-      let detectadas = [];
+      try {
+        const numPredictions = dims[2] || 8400;
+        const numClasses = (dims[1] - 4) || 80;
+        
+        let detectadas = [];
 
-      for (let i = 0; i < Math.min(numPredictions, 8400); i++) {
-        let maxScore = 0;
-        let classId = -1;
+        for (let i = 0; i < Math.min(numPredictions, 8400); i++) {
+          let maxScore = 0;
+          let classId = -1;
 
-        // Encontrar clase con mayor confianza
-        for (let c = 0; c < numClasses; c++) {
-          const score = output[(4 + c) * numPredictions + i] || 0;
-          if (score > maxScore) {
-            maxScore = score;
-            classId = c;
+          // Encontrar clase con mayor confianza
+          for (let c = 0; c < Math.min(numClasses, 80); c++) {
+            const idx = (4 + c) * numPredictions + i;
+            if (idx < output.length) {
+              const score = output[idx] || 0;
+              if (score > maxScore) {
+                maxScore = score;
+                classId = c;
+              }
+            }
+          }
+
+          // Si detecta con confianza alta y es una clase conocida
+          if (maxScore > 0.5 && classNames[classId]) {
+            const x = output[0 * numPredictions + i] || 0;
+            const w = output[2 * numPredictions + i] || 0;
+            const h = output[3 * numPredictions + i] || 0;
+            const area = w * h;
+
+            detectadas.push({
+              nombre: classNames[classId],
+              confianza: (maxScore * 100).toFixed(1),
+              x: x,
+              area: area
+            });
           }
         }
 
-        // Si detecta con confianza alta y es una clase conocida
-        if (maxScore > 0.5 && classNames[classId]) {
-          const x = output[0 * numPredictions + i] || 0;
-          const y = output[1 * numPredictions + i] || 0;
-          const w = output[2 * numPredictions + i] || 0;
-          const h = output[3 * numPredictions + i] || 0;
-          const area = w * h;
+        // Procesar detecciones ordenadas por área (proximidad)
+        detectadas.sort((a, b) => b.area - a.area);
+        
+        if (detectadas.length > 0) {
+          const obj = detectadas[0];
+          const now = Date.now();
+          
+          if (obj.area > 10000 && (now - lastDetectionTime) > 2000) {
+            let posicion = "al frente";
+            if (obj.x < 213) posicion = "a la izquierda";
+            else if (obj.x > 427) posicion = "a la derecha";
 
-          detectadas.push({
-            nombre: classNames[classId],
-            confianza: (maxScore * 100).toFixed(1),
-            x: x,
-            area: area
-          });
+            const mensaje = `${obj.nombre} ${posicion}`;
+            hablar(mensaje);
+            actualizarLog(`${obj.nombre} (${obj.confianza}%) ${posicion}`);
+            lastDetectionTime = now;
+          }
         }
-      }
-
-      // Procesar detecciones ordenadas por área (proximidad)
-      detectadas.sort((a, b) => b.area - a.area);
-      
-      if (detectadas.length > 0) {
-        const obj = detectadas[0];
-        if (obj.area > 10000) { // Solo si está suficientemente cerca
-          let posicion = "al frente";
-          if (obj.x < 213) posicion = "a la izquierda";
-          else if (obj.x > 427) posicion = "a la derecha";
-
-          const mensaje = `${obj.nombre} ${posicion}`;
-          hablar(mensaje);
-          actualizarLog(`Detectado: ${obj.nombre} (${obj.confianza}%) ${posicion}`);
-        }
+      } catch (err) {
+        console.error("Error analizando detecciones:", err);
       }
     }
+
+    // Inicializar estado
+    statusText.innerText = "Listo. Presiona INICIAR";
   </script>
 </body>
 </html>
