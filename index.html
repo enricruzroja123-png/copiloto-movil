@@ -3,24 +3,31 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Copiloto1 - Asistente Visual</title>
-  <!-- Carga de ONNX Runtime Web desde CDN o cache local -->
+  <title>Copiloto - Asistente Visual</title>
+  <!-- Carga de ONNX Runtime Web desde CDN -->
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
   <style>
-    body {
+    * {
       margin: 0;
       padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
       background-color: #000;
       color: #fff;
-      font-family: sans-serif;
+      font-family: Arial, sans-serif;
       text-align: center;
     }
+    
     #video-container {
       position: relative;
       width: 100vw;
       height: 70vh;
       overflow: hidden;
+      background-color: #1a1a1a;
     }
+    
     video, canvas {
       position: absolute;
       top: 0;
@@ -29,40 +36,80 @@
       height: 100%;
       object-fit: cover;
     }
+    
+    canvas {
+      display: none;
+    }
+    
     #controls {
       height: 30vh;
       display: flex;
       flex-direction: column;
       justify-content: center;
       align-items: center;
-      gap: 15px;
+      gap: 20px;
+      padding: 20px;
+      background-color: #0a0a0a;
     }
+    
     button {
-      width: 80%;
-      height: 60px;
-      font-size: 1.3rem;
+      width: 90%;
+      max-width: 400px;
+      height: 70px;
+      font-size: 1.2rem;
       font-weight: bold;
       background-color: #28a745;
       color: white;
       border: none;
       border-radius: 10px;
+      cursor: pointer;
+      transition: background-color 0.3s;
     }
+    
+    button:hover {
+      background-color: #218838;
+    }
+    
+    button:active {
+      background-color: #1e7e34;
+    }
+    
+    button:disabled {
+      background-color: #6c757d;
+      cursor: not-allowed;
+    }
+    
     #status {
-      font-size: 1.1rem;
+      font-size: 1.2rem;
       color: #ffc107;
+      min-height: 30px;
+      font-weight: bold;
+    }
+    
+    #detection-log {
+      font-size: 0.9rem;
+      color: #87ceeb;
+      max-height: 60px;
+      overflow-y: auto;
+      width: 90%;
+      max-width: 400px;
+      background-color: #1a1a1a;
+      padding: 10px;
+      border-radius: 5px;
     }
   </style>
 </head>
 <body>
-
   <div id="video-container">
     <video id="webcam" autoplay playsinline muted></video>
     <canvas id="output-canvas"></canvas>
   </div>
 
   <div id="controls">
-    <div id="status">Cargando sistema...</div>
-    <button id="btn-start" onclick="iniciarCopiloto()">INICIAR ASISTENTE DE VOZ</button>
+    <div id="status">Inicializando...</div>
+    <button id="btn-start" onclick="iniciarCopiloto()">INICIAR</button>
+    <button id="btn-stop" onclick="detenerCopiloto()" disabled>DETENER</button>
+    <div id="detection-log"></div>
   </div>
 
   <script>
@@ -71,158 +118,223 @@
     const canvas = document.getElementById('output-canvas');
     const ctx = canvas.getContext('2d');
     const statusText = document.getElementById('status');
+    const detectionLog = document.getElementById('detection-log');
+    const btnStart = document.getElementById('btn-start');
+    const btnStop = document.getElementById('btn-stop');
+    
     let lastSpokenTime = 0;
     let lastSpokenText = "";
+    let isRunning = false;
+    let detectionInterval = null;
 
-    // Nombres de clases COCO en español para lectura de voz
+    // Nombres de clases COCO en español
     const classNames = {
       0: 'persona', 1: 'bicicleta', 2: 'coche', 3: 'moto', 5: 'autobús',
       7: 'camión', 9: 'semáforo', 10: 'boca de riego', 11: 'señal de stop',
-      13: 'banco'
+      13: 'banco', 15: 'perro', 16: 'gato', 17: 'caballo', 18: 'oveja',
+      19: 'vaca', 20: 'elefante'
     };
 
-    // Configurar síntesis de voz del teléfono
+    // Síntesis de voz
     function hablar(texto) {
       const now = Date.now();
-      // Evitar repetir la misma palabra continuamente (esperar mínimo 2.5s)
-      if (texto === lastSpokenText && (now - lastSpokenTime) < 2500) return;
+      if (texto === lastSpokenText && (now - lastSpokenTime) < 2000) return;
 
-      window.speechSynthesis.cancel(); // Cancelar voz anterior si hay retraso
+      window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(texto);
       utterance.lang = 'es-ES';
-      utterance.rate = 1.1; // Velocidad ligeramente rápida para avisos fluidos
+      utterance.rate = 1.0;
       window.speechSynthesis.speak(utterance);
 
       lastSpokenText = texto;
       lastSpokenTime = now;
     }
 
+    // Actualizar log de detecciones
+    function actualizarLog(texto) {
+      const timestamp = new Date().toLocaleTimeString();
+      detectionLog.innerHTML = `<strong>${timestamp}:</strong> ${texto}<br>` + detectionLog.innerHTML;
+      if (detectionLog.children.length > 5) {
+        detectionLog.removeChild(detectionLog.lastChild);
+      }
+    }
+
     async function iniciarCopiloto() {
-      statusText.innerText = "Iniciando cámara y modelo...";
+      if (isRunning) return;
+      
+      statusText.innerText = "Iniciando cámara...";
       hablar("Iniciando copiloto visual");
+      btnStart.disabled = true;
 
       try {
-        // 1. Acceder a la cámara trasera del teléfono
+        // Acceder a la cámara
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { exact: "environment" } },
+          video: { 
+            facingMode: "environment",
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
           audio: false
         }).catch(() => {
-          // Si no hay cámara trasera especifica, usar la predeterminada
           return navigator.mediaDevices.getUserMedia({ video: true, audio: false });
         });
         
         video.srcObject = stream;
-        await video.play();
+        video.onloadedmetadata = async () => {
+          await video.play();
+          
+          // Esperar a que el video tenga dimensiones
+          setTimeout(async () => {
+            canvas.width = video.videoWidth || 640;
+            canvas.height = video.videoHeight || 480;
 
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+            statusText.innerText = "Cargando modelo IA...";
+            
+            try {
+              // Cargar modelo
+              session = await ort.InferenceSession.create('./yolov8n.onnx', {
+                executionProviders: ['wasm'],
+              });
 
-        // 2. Cargar el modelo ONNX en la memoria del teléfono
-        statusText.innerText = "Cargando IA en el móvil...";
-        session = await ort.InferenceSession.create('./yolov8n.onnx', {
-          executionProviders: ['webgl', 'wasm']
-        });
+              isRunning = true;
+              statusText.innerText = "✓ SISTEMA ACTIVO";
+              hablar("Sistema listo, escaneando");
+              btnStop.disabled = false;
+              actualizarLog("Copiloto iniciado");
 
-        statusText.innerText = "SISTEMA ACTIVO";
-        hablar("Sistema listo. Escaneando el camino.");
-
-        // Bucle de procesamiento en tiempo real
-        procesarCamara();
+              // Procesar cada fotograma
+              procesarCamara();
+            } catch (err) {
+              statusText.innerText = "Error modelo: " + err.message;
+              hablar("Error al cargar modelo");
+              console.error("Error modelo:", err);
+              btnStart.disabled = false;
+            }
+          }, 500);
+        };
       } catch (err) {
-        statusText.innerText = "Error de inicio: " + err.message;
-        hablar("Error al iniciar el sistema");
-        console.error(err);
+        statusText.innerText = "Error cámara: " + err.message;
+        hablar("Error al acceder a cámara");
+        console.error("Error cámara:", err);
+        btnStart.disabled = false;
       }
     }
 
-    async function procesarCamara() {
-      if (!session) return;
-
-      // Dibujar frame actual en canvas para procesar datos
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    function detenerCopiloto() {
+      isRunning = false;
+      session = null;
+      statusText.innerText = "Detenido";
+      btnStart.disabled = false;
+      btnStop.disabled = true;
       
-      // Preprocesamiento básico (Redimensionar y normalizar a 640x640)
-      const inputTensor = prepararTensor(video);
+      if (video.srcObject) {
+        video.srcObject.getTracks().forEach(track => track.stop());
+      }
       
-      // Inferencia con ONNX en el procesador del teléfono
-      const feeds = {};
-      feeds[session.inputNames[0]] = inputTensor;
-      const results = await session.run(feeds);
-      
-      // Output0 de YOLOv8
-      const output = results[session.outputNames[0]].data;
-      
-      // Post-procesamiento y detección de distancias
-      analizarDetecciones(output);
-
-      // Siguiente fotograma
-      requestAnimationFrame(procesarCamara);
+      hablar("Copiloto detenido");
+      actualizarLog("Sistema detenido");
     }
 
-    function prepararTensor(imageSource) {
-      // Crear un canvas temporal de 640x640 para YOLOv8
+    async function procesarCamara() {
+      if (!isRunning || !session) return;
+
+      try {
+        // Dibujar video en canvas
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        
+        // Preparar tensor
+        const inputTensor = prepararTensor();
+        
+        // Inferencia
+        const feeds = {};
+        feeds[session.inputNames[0]] = inputTensor;
+        const results = await session.run(feeds);
+        
+        // Procesar resultados
+        const output = results[session.outputNames[0]];
+        analizarDetecciones(output.data, output.dims);
+
+        inputTensor.dispose();
+
+        // Siguiente fotograma
+        requestAnimationFrame(procesarCamara);
+      } catch (err) {
+        console.error("Error procesamiento:", err);
+      }
+    }
+
+    function prepararTensor() {
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = 640;
       tempCanvas.height = 640;
       const tempCtx = tempCanvas.getContext('2d');
-      tempCtx.drawImage(imageSource, 0, 0, 640, 640);
-
+      
+      // Dibujar video escalado
+      tempCtx.drawImage(video, 0, 0, 640, 640);
+      
       const imgData = tempCtx.getImageData(0, 0, 640, 640).data;
-      const float32Data = new Float32Array(1 * 3 * 640 * 640);
+      const float32Data = new Float32Array(640 * 640 * 3);
 
-      // Normalizar imagen (RGB de 0-255 a 0.0-1.0)
+      // Normalizar imagen RGB
       for (let i = 0; i < 640 * 640; i++) {
-        float32Data[i] = imgData[i * 4] / 255.0;                   // R
-        float32Data[i + 640 * 640] = imgData[i * 4 + 1] / 255.0;     // G
-        float32Data[i + 2 * 640 * 640] = imgData[i * 4 + 2] / 255.0; // B
+        float32Data[i] = imgData[i * 4] / 255.0;                          // R
+        float32Data[i + 640 * 640] = imgData[i * 4 + 1] / 255.0;          // G
+        float32Data[i + 2 * 640 * 640] = imgData[i * 4 + 2] / 255.0;      // B
       }
 
       return new ort.Tensor('float32', float32Data, [1, 3, 640, 640]);
     }
 
-    function analizarDetecciones(output) {
-      // output viene en formato (1, 84, 8400)
-      const numPredictions = 8400;
-      let objetoMasCercano = null;
-      let maxArea = 0;
+    function analizarDetecciones(output, dims) {
+      const numPredictions = dims[2] || 8400;
+      const numClasses = dims[1] - 4 || 80;
+      
+      let detectadas = [];
 
-      for (let i = 0; i < numPredictions; i++) {
-        // Encontrar la clase con mayor confianza
+      for (let i = 0; i < Math.min(numPredictions, 8400); i++) {
         let maxScore = 0;
         let classId = -1;
 
-        for (let c = 0; c < 80; c++) {
-          const score = output[(4 + c) * numPredictions + i];
+        // Encontrar clase con mayor confianza
+        for (let c = 0; c < numClasses; c++) {
+          const score = output[(4 + c) * numPredictions + i] || 0;
           if (score > maxScore) {
             maxScore = score;
             classId = c;
           }
         }
 
-        // Si supera el umbral de confianza y es una clase útil para peatones
-        if (maxScore > 0.45 && classNames[classId]) {
-          const w = output[2 * numPredictions + i];
-          const h = output[3 * numPredictions + i];
-          const area = w * h; // El área refleja la proximidad del objeto
+        // Si detecta con confianza alta y es una clase conocida
+        if (maxScore > 0.5 && classNames[classId]) {
+          const x = output[0 * numPredictions + i] || 0;
+          const y = output[1 * numPredictions + i] || 0;
+          const w = output[2 * numPredictions + i] || 0;
+          const h = output[3 * numPredictions + i] || 0;
+          const area = w * h;
 
-          if (area > maxArea) {
-            maxArea = area;
-            objetoMasCercano = {
-              nombre: classNames[classId],
-              area: area,
-              cx: output[0 * numPredictions + i]
-            };
-          }
+          detectadas.push({
+            nombre: classNames[classId],
+            confianza: (maxScore * 100).toFixed(1),
+            x: x,
+            area: area
+          });
         }
       }
 
-      // Si detecta un objeto cercano, avisar por voz con posición
-      if (objetoMasCercano && maxArea > 15000) { // Umbral de proximidad
-        let posicion = "al frente";
-        if (objetoMasCercano.cx < 210) posicion = "a la izquierda";
-        else if (objetoMasCercano.cx > 430) posicion = "a la derecha";
+      // Procesar detecciones ordenadas por área (proximidad)
+      detectadas.sort((a, b) => b.area - a.area);
+      
+      if (detectadas.length > 0) {
+        const obj = detectadas[0];
+        if (obj.area > 10000) { // Solo si está suficientemente cerca
+          let posicion = "al frente";
+          if (obj.x < 213) posicion = "a la izquierda";
+          else if (obj.x > 427) posicion = "a la derecha";
 
-        hablar(`${objetoMasCercano.nombre} ${posicion}`);
+          const mensaje = `${obj.nombre} ${posicion}`;
+          hablar(mensaje);
+          actualizarLog(`Detectado: ${obj.nombre} (${obj.confianza}%) ${posicion}`);
+        }
       }
     }
   </script>
