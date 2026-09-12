@@ -28,7 +28,7 @@
       background-color: #1a1a1a;
     }
     
-    video, canvas {
+    video {
       position: absolute;
       top: 0;
       left: 0;
@@ -92,6 +92,7 @@
       background-color: #1a1a1a;
       padding: 10px;
       border-radius: 5px;
+      text-align: left;
     }
   </style>
 </head>
@@ -124,19 +125,31 @@
     let frameCount = 0;
     let processingFrame = false;
     let lastDetectionTime = 0;
+    let totalDetections = 0;
 
-    // Nombres de clases COCO en español
-    const classNames = {
-      0: 'persona', 1: 'bicicleta', 2: 'coche', 3: 'moto', 5: 'autobús',
-      7: 'camión', 9: 'semáforo', 10: 'boca de riego', 11: 'señal de stop',
-      13: 'banco', 15: 'perro', 16: 'gato', 17: 'caballo', 18: 'oveja',
-      19: 'vaca', 20: 'elefante'
-    };
+    // Nombres de clases COCO en español (80 clases)
+    const classNames = [
+      'persona', 'bicicleta', 'coche', 'moto', 'autobús',
+      'tren', 'camión', 'bote', 'semáforo', 'boca de riego',
+      'señal de stop', 'parquímetro', 'banco', 'pájaro', 'gato',
+      'perro', 'caballo', 'oveja', 'vaca', 'elefante',
+      'oso', 'cebra', 'jirafa', 'mochila', 'paraguas',
+      'bolsa', 'corbata', 'maleta', 'disco volador', 'esquís',
+      'tabla de esquí', 'tabla de deportes acuáticos', 'tabla de surf', 'botella de tenis', 'taza',
+      'tenedor', 'cuchillo', 'cuchara', 'cuenco', 'plátano',
+      'manzana', 'sándwich', 'naranja', 'brócoli', 'zanahoria',
+      'perrito caliente', 'pizza', 'donut', 'pastel', 'silla',
+      'sofá', 'planta en maceta', 'cama', 'mesa de comedor', 'váter',
+      'televisión', 'portátil', 'ratón', 'teclado', 'microondas',
+      'horno', 'tostadora', 'fregadero', 'refrigerador', 'libro',
+      'reloj', 'florero', 'tijeras', 'oso de peluche', 'secador de pelo',
+      'cepillo de dientes', 'monopatín', 'pelota de surf', 'muñeca de acción', 'piscina'
+    ];
 
     // Síntesis de voz
     function hablar(texto) {
       const now = Date.now();
-      if (texto === lastSpokenText && (now - lastSpokenTime) < 2500) return;
+      if (texto === lastSpokenText && (now - lastSpokenTime) < 2000) return;
 
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(texto);
@@ -153,7 +166,7 @@
     function actualizarLog(texto) {
       const timestamp = new Date().toLocaleTimeString();
       const logEntry = document.createElement('div');
-      logEntry.innerHTML = `<strong>${timestamp}:</strong> ${texto}`;
+      logEntry.innerHTML = `${timestamp}: ${texto}`;
       detectionLog.insertBefore(logEntry, detectionLog.firstChild);
       
       // Mantener solo los últimos 5
@@ -187,17 +200,23 @@
         
         // Esperar a que el video esté listo
         await new Promise((resolve) => {
-          video.onloadedmetadata = () => {
-            video.play();
-            resolve();
+          const checkVideo = () => {
+            if (video.videoWidth > 0) {
+              video.play();
+              resolve();
+            } else {
+              setTimeout(checkVideo, 100);
+            }
           };
-          setTimeout(resolve, 2000); // Timeout de seguridad
+          setTimeout(resolve, 3000); // Timeout de seguridad
+          checkVideo();
         });
 
         canvas.width = video.videoWidth || 640;
         canvas.height = video.videoHeight || 480;
 
         statusText.innerText = "Cargando modelo IA...";
+        actualizarLog("Cargando modelo YOLOv8...");
         
         // Cargar modelo ONNX
         try {
@@ -205,24 +224,29 @@
             executionProviders: ['wasm'],
           });
 
+          console.log("Modelo cargado. Nombres entrada:", session.inputNames);
+          console.log("Nombres salida:", session.outputNames);
+
           isRunning = true;
           frameCount = 0;
+          totalDetections = 0;
           statusText.innerText = "✓ SISTEMA ACTIVO";
-          hablar("Sistema listo");
+          hablar("Sistema listo, escaneando el camino");
           btnStop.disabled = false;
-          actualizarLog("Copiloto iniciado correctamente");
+          actualizarLog("Modelo listo. Iniciando detección...");
 
           // Iniciar procesamiento
           procesarCamara();
         } catch (modelErr) {
           statusText.innerText = "Error modelo: " + modelErr.message;
-          hablar("Error al cargar modelo");
           console.error("Error modelo:", modelErr);
+          actualizarLog("Error al cargar modelo");
           btnStart.disabled = false;
         }
       } catch (err) {
         statusText.innerText = "Error: " + err.message;
         console.error("Error:", err);
+        actualizarLog("Error: " + err.message.substring(0, 40));
         btnStart.disabled = false;
       }
     }
@@ -242,7 +266,7 @@
       }
       
       hablar("Copiloto detenido");
-      actualizarLog("Sistema detenido");
+      actualizarLog(`Sistema detenido. Total detecciones: ${totalDetections}`);
     }
 
     async function procesarCamara() {
@@ -254,9 +278,9 @@
       processingFrame = true;
 
       try {
-        // Procesar cada 3 frames (optimización)
+        // Procesar cada 2 frames (más rápido)
         frameCount++;
-        if (frameCount % 3 !== 0) {
+        if (frameCount % 2 !== 0) {
           processingFrame = false;
           requestAnimationFrame(procesarCamara);
           return;
@@ -287,9 +311,9 @@
         inputTensor.dispose();
 
       } catch (err) {
-        console.error("Error procesamiento:", err);
+        console.error("Error procesamiento frame", frameCount, ":", err);
         if (frameCount % 30 === 0) {
-          actualizarLog("Error: " + err.message.substring(0, 30));
+          actualizarLog("Error proc: " + err.message.substring(0, 25));
         }
       } finally {
         processingFrame = false;
@@ -310,7 +334,7 @@
         const imgData = tempCtx.getImageData(0, 0, 640, 640).data;
         const float32Data = new Float32Array(640 * 640 * 3);
 
-        // Normalizar imagen RGB
+        // Normalizar imagen RGB (0-255 -> 0-1)
         for (let i = 0; i < 640 * 640; i++) {
           float32Data[i] = imgData[i * 4] / 255.0;                          // R
           float32Data[i + 640 * 640] = imgData[i * 4 + 1] / 255.0;          // G
@@ -326,59 +350,87 @@
 
     function analizarDetecciones(output, dims) {
       try {
-        const numPredictions = dims[2] || 8400;
-        const numClasses = (dims[1] - 4) || 80;
+        // YOLOv8 output: [1, 8400, 84]
+        // 84 = 4 (x,y,w,h) + 80 (clases)
         
-        let detectadas = [];
+        if (!dims || dims.length < 3) {
+          console.error("Dimensiones inesperadas:", dims);
+          return;
+        }
 
-        for (let i = 0; i < Math.min(numPredictions, 8400); i++) {
+        const numPredictions = dims[1] || 8400;
+        const numValues = dims[2] || 84;
+        const numClasses = Math.min(numValues - 4, 80);
+
+        let detectadas = [];
+        let debugCount = 0;
+
+        for (let i = 0; i < numPredictions; i++) {
+          const baseIdx = i * numValues;
+          
+          // Extraer coordenadas
+          const x = output[baseIdx] || 0;
+          const y = output[baseIdx + 1] || 0;
+          const w = output[baseIdx + 2] || 0;
+          const h = output[baseIdx + 3] || 0;
+
+          // Buscar clase con máxima confianza
           let maxScore = 0;
           let classId = -1;
 
-          // Encontrar clase con mayor confianza
-          for (let c = 0; c < Math.min(numClasses, 80); c++) {
-            const idx = (4 + c) * numPredictions + i;
-            if (idx < output.length) {
-              const score = output[idx] || 0;
-              if (score > maxScore) {
-                maxScore = score;
-                classId = c;
-              }
+          for (let c = 0; c < numClasses; c++) {
+            const score = output[baseIdx + 4 + c] || 0;
+            if (score > maxScore) {
+              maxScore = score;
+              classId = c;
             }
           }
 
-          // Si detecta con confianza alta y es una clase conocida
-          if (maxScore > 0.5 && classNames[classId]) {
-            const x = output[0 * numPredictions + i] || 0;
-            const w = output[2 * numPredictions + i] || 0;
-            const h = output[3 * numPredictions + i] || 0;
+          // Si supera umbral y es una clase válida
+          if (maxScore > 0.35 && classId >= 0 && classId < classNames.length) {
             const area = w * h;
 
-            detectadas.push({
-              nombre: classNames[classId],
-              confianza: (maxScore * 100).toFixed(1),
-              x: x,
-              area: area
-            });
+            if (area > 0.0001) { // Área mínima muy pequeña (normalizada)
+              detectadas.push({
+                nombre: classNames[classId],
+                confianza: (maxScore * 100).toFixed(1),
+                x: x,
+                y: y,
+                w: w,
+                h: h,
+                area: area
+              });
+
+              if (debugCount < 3) {
+                console.log(`Detección ${i}: ${classNames[classId]} (${(maxScore*100).toFixed(1)}%) area=${area.toFixed(4)}`);
+                debugCount++;
+              }
+            }
           }
         }
 
         // Procesar detecciones ordenadas por área (proximidad)
         detectadas.sort((a, b) => b.area - a.area);
         
+        if (detectadas.length > 0 && frameCount % 15 === 0) {
+          console.log(`Total detecciones en frame ${frameCount}: ${detectadas.length}`);
+        }
+
         if (detectadas.length > 0) {
           const obj = detectadas[0];
           const now = Date.now();
           
-          if (obj.area > 10000 && (now - lastDetectionTime) > 2000) {
+          // Umbral muy bajo para avisar
+          if (obj.area > 0.001 && (now - lastDetectionTime) > 1500) {
             let posicion = "al frente";
-            if (obj.x < 213) posicion = "a la izquierda";
-            else if (obj.x > 427) posicion = "a la derecha";
+            if (obj.x < 0.33) posicion = "a la izquierda";
+            else if (obj.x > 0.67) posicion = "a la derecha";
 
             const mensaje = `${obj.nombre} ${posicion}`;
             hablar(mensaje);
-            actualizarLog(`${obj.nombre} (${obj.confianza}%) ${posicion}`);
+            actualizarLog(`✓ ${obj.nombre} ${posicion} (${obj.confianza}%)`);
             lastDetectionTime = now;
+            totalDetections++;
           }
         }
       } catch (err) {
