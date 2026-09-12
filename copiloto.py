@@ -214,6 +214,8 @@ print(f"📌 Formato de modelo: {model_format}\n")
 
 # Loop principal
 frame_count = 0
+SHOW_WINDOW = True  # Variable para controlar si mostrar ventana
+
 try:
     while cap.isOpened():
         ret, frame = cap.read()
@@ -309,13 +311,26 @@ try:
         cv2.putText(frame, "Presiona 'Q' para salir", (10, alto_pantalla - 20), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
-        # Mostrar video
-        cv2.imshow('🚨 Copiloto - Sistema de Visión Asistida', frame)
+        # Intentar mostrar video (con manejo de error para Windows sin GUI)
+        if SHOW_WINDOW:
+            try:
+                cv2.imshow('🚨 Copiloto - Sistema de Visión Asistida', frame)
+            except cv2.error as e:
+                print(f"⚠️ No se puede mostrar ventana (sin soporte GUI)")
+                print(f"   Pero el sistema sigue funcionando. Solo escucharás los avisos de voz.")
+                SHOW_WINDOW = False
 
-        # Salir con 'Q'
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            hablar("Sistema detenido")
-            break
+        # Salir con 'Q' (solo si la ventana está abierta)
+        if SHOW_WINDOW:
+            try:
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    hablar("Sistema detenido")
+                    break
+            except:
+                pass
+        else:
+            # Sin ventana, presionar Ctrl+C para salir
+            time.sleep(0.03)
 
 except KeyboardInterrupt:
     print("\n⚠️ Sistema interrumpido por el usuario")
@@ -325,5 +340,8 @@ except Exception as e:
     hablar(f"Error del sistema")
 finally:
     cap.release()
-    cv2.destroyAllWindows()
+    try:
+        cv2.destroyAllWindows()
+    except:
+        pass
     print("✅ Recursos liberados. Adiós!")
