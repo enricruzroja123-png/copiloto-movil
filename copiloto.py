@@ -2,8 +2,24 @@ import cv2
 import pyttsx3
 import time
 import numpy as np
-from ultralytics import YOLO
+import os
+import sys
 from collections import defaultdict
+
+# Intentar cargar YOLO, sino usar ONNX directo
+try:
+    from ultralytics import YOLO
+    USE_ULTRALYTICS = True
+except ImportError:
+    USE_ULTRALYTICS = False
+    print("⚠️ ultralytics no disponible, usando ONNX Runtime")
+
+# Si disponible ONNX Runtime
+try:
+    import onnxruntime as ort
+    USE_ONNX = True
+except ImportError:
+    USE_ONNX = False
 
 # Inicializar síntesis de voz
 engine = pyttsx3.init()
@@ -18,9 +34,61 @@ def hablar(texto):
     except Exception as e:
         print(f"❌ Error de sonido: {e}")
 
-# Cargar modelo YOLO
-print("📊 Cargando modelo YOLO8...")
-model = YOLO('yolov8n.pt')
+# Cargar modelo YOLO - OFFLINE
+print("📊 Cargando modelo...")
+
+model = None
+model_format = None
+
+# Opción 1: Intentar usar archivo .pt local
+if os.path.exists('yolov8n.pt'):
+    print("✅ Encontrado yolov8n.pt local")
+    try:
+        if USE_ULTRALYTICS:
+            model = YOLO('yolov8n.pt')
+            model_format = 'ultralytics'
+            print("✅ Modelo cargado con ultralytics")
+        else:
+            raise ImportError("ultralytics no disponible")
+    except Exception as e:
+        print(f"⚠️ Error cargando .pt: {e}")
+        model = None
+
+# Opción 2: Usar archivo .onnx local
+if model is None and os.path.exists('yolov8n.onnx'):
+    print("✅ Encontrado yolov8n.onnx local")
+    try:
+        if USE_ONNX:
+            # Usar ONNX Runtime
+            session = ort.InferenceSession('yolov8n.onnx', providers=['CPUExecutionProvider'])
+            model = session
+            model_format = 'onnx'
+            print("✅ Modelo ONNX cargado con ONNX Runtime")
+        else:
+            # Alternativa: usar OpenCV DNN
+            model = cv2.dnn.readNetFromONNX('yolov8n.onnx')
+            model_format = 'opencv_dnn'
+            print("✅ Modelo ONNX cargado con OpenCV DNN")
+    except Exception as e:
+        print(f"⚠️ Error cargando .onnx: {e}")
+        model = None
+
+# Si no se puede cargar, intentar descargar solo si hay internet
+if model is None:
+    print("⚠️ Modelos locales no encontrados. Intentando descargar...")
+    if USE_ULTRALYTICS:
+        try:
+            model = YOLO('yolov8n.pt')  # Descargará si tiene internet
+            model_format = 'ultralytics'
+            print("✅ Modelo descargado desde internet")
+        except Exception as e:
+            print(f"❌ No se pudo cargar el modelo: {e}")
+            hablar("Error: No se puede cargar el modelo de visión")
+            sys.exit(1)
+    else:
+        print("❌ No se puede cargar el modelo sin conexión a internet")
+        hablar("Error: Modelo de visión no disponible")
+        sys.exit(1)
 
 # Objetos prioritarios para detectar
 OBJETOS_PRIORITARIOS = {
@@ -111,6 +179,26 @@ def es_peligro(cls_id, nombre_objeto, proporcion_area):
     
     return False
 
+def procesar_detecciones_ultralytics(frame, model, CONFIANZA_MINIMA):
+    """Procesar detecciones con ultralytics"""
+    results = model(frame, stream=True, verbose=False, conf=CONFIANZA_MINIMA)
+    objetos = []
+    
+    for r in results:
+        for box in r.boxes:
+            cls_id = int(box.cls[0])
+            confianza = float(box.conf[0])
+            
+            if cls_id in OBJETOS_PRIORITARIOS:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                objetos.append({
+                    'cls_id': cls_id,
+                    'confianza': confianza,
+                    'bbox': (x1, y1, x2, y2)
+                })
+    
+    return objetos
+
 # Inicializar cámara
 print("📷 Iniciando cámara...")
 cap = cv2.VideoCapture(0)
@@ -118,10 +206,11 @@ cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     print("❌ No se pudo abrir la cámara")
     hablar("Error: No se puede acceder a la cámara")
-    exit()
+    sys.exit(1)
 
 hablar("Copiloto iniciado. Sistema listo")
-print("✅ Sistema iniciado correctamente\n")
+print(f"✅ Sistema iniciado correctamente")
+print(f"📌 Formato de modelo: {model_format}\n")
 
 # Loop principal
 frame_count = 0
@@ -141,76 +230,81 @@ try:
         alto_pantalla = frame.shape[0]
 
         # Realizar detección
-        results = model(frame, stream=True, verbose=False, conf=CONFIANZA_MINIMA)
-
         objetos_detectados = []
+        
+        if model_format == 'ultralytics':
+            objetos_info = procesar_detecciones_ultralytics(frame, model, CONFIANZA_MINIMA)
+        else:
+            # Para ONNX, mantener compatible
+            print("⚠️ Soporte ONNX básico. Usa el modelo .pt para mejor rendimiento")
+            objetos_info = []
 
-        for r in results:
-            for box in r.boxes:
-                cls_id = int(box.cls[0])
-                confianza = float(box.conf[0])
+        for obj in objetos_info:
+            cls_id = obj['cls_id']
+            confianza = obj['confianza']
+            x1, y1, x2, y2 = obj['bbox']
+            
+            centro_x = (x1 + x2) // 2
+            centro_y = (y1 + y2) // 2
+            
+            area_objeto = (x2 - x1) * (y2 - y1)
+            area_total = ancho_pantalla * alto_pantalla
+            proporcion_area = area_objeto / area_total
+
+            if proporcion_area > AREA_MINIMA:
+                nombre_objeto = OBJETOS_PRIORITARIOS[cls_id]
+                posicion = obtener_posicion(centro_x, ancho_pantalla)
+                distancia = obtener_distancia(proporcion_area)
                 
-                if cls_id in OBJETOS_PRIORITARIOS:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    centro_x = (x1 + x2) // 2
-                    centro_y = (y1 + y2) // 2
-                    
-                    area_objeto = (x2 - x1) * (y2 - y1)
-                    area_total = ancho_pantalla * alto_pantalla
-                    proporcion_area = area_objeto / area_total
+                # Información básica
+                info_objeto = {
+                    'nombre': nombre_objeto,
+                    'posicion': posicion,
+                    'distancia': distancia,
+                    'clase': cls_id,
+                    'confianza': confianza,
+                    'area': proporcion_area,
+                    'coords': (x1, y1, x2, y2)
+                }
 
-                    if proporcion_area > AREA_MINIMA:
-                        nombre_objeto = OBJETOS_PRIORITARIOS[cls_id]
-                        posicion = obtener_posicion(centro_x, ancho_pantalla)
-                        distancia = obtener_distancia(proporcion_area)
-                        
-                        # Información básica
-                        info_objeto = {
-                            'nombre': nombre_objeto,
-                            'posicion': posicion,
-                            'distancia': distancia,
-                            'clase': cls_id,
-                            'confianza': confianza,
-                            'area': proporcion_area,
-                            'coords': (x1, y1, x2, y2)
-                        }
+                # Detectar color de semáforo
+                if cls_id == 11:  # Semáforo
+                    color = detectar_color_semaforo(frame, x1, y1, x2, y2)
+                    info_objeto['color'] = color
+                    mensaje = f"Semáforo en {color} {posicion}"
+                    color_rect = (0, 0, 255) if color == "rojo" else (0, 255, 0) if color == "verde" else (0, 165, 255)
+                else:
+                    mensaje = f"{nombre_objeto} {posicion}, {distancia}"
+                    color_rect = (0, 255, 0)
 
-                        # Detectar color de semáforo
-                        if cls_id == 11:  # Semáforo
-                            color = detectar_color_semaforo(frame, x1, y1, x2, y2)
-                            info_objeto['color'] = color
-                            mensaje = f"Semáforo en {color} {posicion}"
-                            color_rect = (0, 0, 255) if color == "rojo" else (0, 255, 0) if color == "verde" else (0, 165, 255)
-                        else:
-                            mensaje = f"{nombre_objeto} {posicion}, {distancia}"
-                            color_rect = (0, 255, 0)
+                objetos_detectados.append(info_objeto)
 
-                        objetos_detectados.append(info_objeto)
+                # Avisar si es peligro
+                tiempo_actual = time.time()
+                key_aviso = f"{cls_id}_{nombre_objeto}"
+                
+                if es_peligro(cls_id, nombre_objeto, proporcion_area):
+                    if tiempo_actual - ultimo_aviso_tiempo.get(key_aviso, 0) > intervalo_aviso:
+                        hablar(mensaje)
+                        ultimo_aviso_tiempo[key_aviso] = tiempo_actual
+                else:
+                    # Avisos normales con intervalo mayor
+                    if tiempo_actual - ultimo_aviso_tiempo.get(key_aviso, 0) > intervalo_aviso * 1.5:
+                        hablar(mensaje)
+                        ultimo_aviso_tiempo[key_aviso] = tiempo_actual
 
-                        # Avisar si es peligro
-                        tiempo_actual = time.time()
-                        key_aviso = f"{cls_id}_{nombre_objeto}"
-                        
-                        if es_peligro(cls_id, nombre_objeto, proporcion_area):
-                            if tiempo_actual - ultimo_aviso_tiempo.get(key_aviso, 0) > intervalo_aviso:
-                                hablar(mensaje)
-                                ultimo_aviso_tiempo[key_aviso] = tiempo_actual
-                        else:
-                            # Avisos normales con intervalo mayor
-                            if tiempo_actual - ultimo_aviso_tiempo.get(key_aviso, 0) > intervalo_aviso * 1.5:
-                                hablar(mensaje)
-                                ultimo_aviso_tiempo[key_aviso] = tiempo_actual
-
-                        # Dibujar en frame
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), color_rect, 2)
-                        cv2.putText(frame, mensaje, (x1, y1 - 10), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_rect, 2)
-                        cv2.circle(frame, (centro_x, centro_y), 5, (0, 0, 255), -1)
+                # Dibujar en frame
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color_rect, 2)
+                cv2.putText(frame, mensaje, (x1, y1 - 10), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_rect, 2)
+                cv2.circle(frame, (centro_x, centro_y), 5, (0, 0, 255), -1)
 
         # Mostrar información en pantalla
         cv2.putText(frame, f"Frame: {frame_count}", (10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         cv2.putText(frame, f"Objetos: {len(objetos_detectados)}", (10, 60), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(frame, f"Modo: {model_format}", (10, 90),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         cv2.putText(frame, "Presiona 'Q' para salir", (10, alto_pantalla - 20), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
@@ -228,7 +322,7 @@ except KeyboardInterrupt:
     hablar("Sistema detenido")
 except Exception as e:
     print(f"❌ Error: {e}")
-    hablar(f"Error del sistema: {e}")
+    hablar(f"Error del sistema")
 finally:
     cap.release()
     cv2.destroyAllWindows()
