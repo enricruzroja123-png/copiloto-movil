@@ -48,7 +48,7 @@
                 utterance.lang = 'es-ES';
                 utterance.rate = 1.0;
                 utterance.pitch = 1.0;
-                
+
                 // Buscar una voz en español disponible de forma nativa
                 const voces = window.speechSynthesis.getVoices();
                 const vozEs = voces.find(v => v.lang.startsWith('es'));
@@ -133,7 +133,6 @@
 
         window.onload = () => {
             iniciarCamara();
-            // Intentar cargar voces para soporte temprano en algunos dispositivos
             if ('speechSynthesis' in window) {
                 window.speechSynthesis.getVoices();
             }
