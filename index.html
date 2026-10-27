@@ -112,6 +112,9 @@
     let isRunning = false;
     let frameCount = 0;
     const logs = [];
+    let lastAlertAt = 0;
+    const ALERT_COOLDOWN_MS = 4000;
+    let audioContext = null;
 
     function addLog(msg) {
       const timestamp = new Date().toLocaleTimeString();
@@ -119,6 +122,54 @@
       debugLog.innerHTML = logs.slice(-10).map(l => l.replace(/</g, '&lt;').replace(/>/g, '&gt;')).join('<br>');
       debugLog.scrollTop = debugLog.scrollHeight;
       console.log(msg);
+    }
+
+    function getAudioContext() {
+      if (!audioContext) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+          audioContext = new AudioCtx();
+        }
+      }
+      return audioContext;
+    }
+
+    function emitirBeep(frecuencia = 880, duracion = 220, volumen = 0.04) {
+      const audioCtx = getAudioContext();
+      if (!audioCtx) return;
+
+      const oscillator = audioCtx.createOscillator();
+      const gainNode = audioCtx.createGain();
+
+      oscillator.type = 'sine';
+      oscillator.frequency.value = frecuencia;
+      gainNode.gain.value = volumen;
+
+      oscillator.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+
+      oscillator.start();
+      setTimeout(() => {
+        oscillator.stop();
+      }, duracion);
+    }
+
+    function reproducirAlertaSonora() {
+      const now = Date.now();
+      if (now - lastAlertAt < ALERT_COOLDOWN_MS) return;
+      lastAlertAt = now;
+
+      if ('speechSynthesis' in window) {
+        const mensaje = new SpeechSynthesisUtterance('Alerta de peligro');
+        mensaje.lang = 'es-ES';
+        mensaje.rate = 1.1;
+        speechSynthesis.cancel();
+        speechSynthesis.speak(mensaje);
+      }
+
+      emitirBeep(880, 190, 0.05);
+      setTimeout(() => emitirBeep(660, 170, 0.05), 180);
+      addLog('🚨 Alerta sonora activada');
     }
 
     async function iniciarCopiloto() {
@@ -202,7 +253,6 @@
       try {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         
-        // Preparar tensor
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = 640;
         tempCanvas.height = 640;
@@ -219,10 +269,8 @@
         }
 
         const inputTensor = new ort.Tensor('float32', float32Data, [1, 3, 640, 640]);
-        
         const feeds = { [session.inputNames[0]]: inputTensor };
         const results = await session.run(feeds);
-        
         const outputName = session.outputNames[0];
         const output = results[outputName];
 
@@ -232,7 +280,6 @@
           addLog(`📊 Primeros 10 valores: ${Array.from(output.data).slice(0, 10).map(v => v.toFixed(3)).join(', ')}`);
         }
 
-        // Buscar valores > 0.5
         let maxVal = 0;
         let maxIdx = 0;
         for (let i = 0; i < Math.min(1000, output.data.length); i++) {
@@ -244,6 +291,10 @@
 
         if (frameCount % 30 === 0) {
           addLog(`Frame ${frameCount}: max=${maxVal.toFixed(4)} en índice ${maxIdx}`);
+        }
+
+        if (maxVal > 0.7) {
+          reproducirAlertaSonora();
         }
 
         inputTensor.dispose();
