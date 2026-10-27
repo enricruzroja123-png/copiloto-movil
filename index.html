@@ -3,140 +3,121 @@
 <head>
     <meta charset='UTF-8'>
     <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-    <title>Copiloto - Asistente de un Toque</title>
+    <title>Depuración de Voz - Copiloto</title>
     <style>
         body, html {
             margin: 0; padding: 0; width: 100%; height: 100%;
-            background-color: #121212; font-family: sans-serif; overflow: hidden;
+            background-color: #121212; font-family: sans-serif; 
+            color: white; display: flex; flex-direction: column;
         }
-        .pantalla-completa {
-            width: 100%; height: 100%; border: none;
+        .boton-tocar {
+            width: 100%; height: 50vh;
             background-color: #1b5e20; color: white;
-            font-size: 2.2rem; font-weight: bold; text-align: center;
-            display: flex; flex-direction: column; justify-content: center;
-            align-items: center; padding: 20px; box-sizing: border-box;
-            cursor: pointer; transition: background-color 0.2s;
+            font-size: 2rem; font-weight: bold; text-align: center;
+            border: none; cursor: pointer;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            box-sizing: border-box;
         }
-        .pantalla-completa:active { background-color: #0b3010; }
-        .subtexto { font-size: 1.1rem; margin-top: 15px; color: #a5d6a7; }
-        #webcam { display: none; }
+        .boton-tocar:active { background-color: #0b3010; }
+        .consola-depuracion {
+            width: 100%; height: 50vh;
+            background-color: #1e1e1e; border-top: 3px solid #00e676;
+            padding: 15px; box-sizing: border-box; overflow-y: auto;
+            font-family: monospace; font-size: 13px; line-height: 1.5;
+        }
+        .log-error { color: #ff5252; }
+        .log-success { color: #69f0ae; }
+        .log-info { color: #40c4ff; }
     </style>
 </head>
 <body>
 
-    <button class="pantalla-completa" id="botonAccion" onclick="gestionarToque()">
-        TOQUE LA PANTALLA
-        <div class="subtexto" id="instrucciones">PARA ACTIVAR ASISTENCIA DE VOZ</div>
+    <button class="boton-tocar" id="btnAccion" onclick="intentarHablar()">
+        TOCAR PANTALLA
+        <div style="font-size: 1rem; margin-top: 10px; color: #a5d6a7;">Para desbloquear audio y hablar</div>
     </button>
 
-    <video id="webcam" autoplay playsinline></video>
-    <canvas id="canvas" style="display:none;"></canvas>
+    <div class="consola-depuracion" id="consola">
+        <span class="log-info">[Consola de Diagnóstico Iniciada]</span><br>
+    </div>
 
     <script>
-        const boton = document.getElementById('botonAccion');
-        const instrucciones = document.getElementById('instrucciones');
-        const video = document.getElementById('webcam');
-        const canvas = document.getElementById('canvas');
-        let streamActivo = null;
-        let motorVozDesbloqueado = false;
+        const consola = document.getElementById('consola');
+        let motorListo = false;
 
-        // Sistema de audio móvil blindado
-        function hablar(texto) {
+        function log(msg, tipo = 'info') {
+            const div = document.createElement('div');
+            div.className = 'log-' + tipo;
+            div.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            consola.appendChild(div);
+            consola.scrollTop = consola.scrollHeight;
+        }
+
+        // Monitorear compatibilidad del navegador
+        window.onload = () => {
             if ('speechSynthesis' in window) {
-                window.speechSynthesis.cancel(); // Detener cualquier reproducción previa
-                const utterance = new SpeechSynthesisUtterance(texto);
+                log("✓ speechSynthesis detectado en el navegador móvil.", "success");
+                
+                // Cargar voces de forma asíncrona
+                window.speechSynthesis.onvoiceschanged = () => {
+                    const voces = window.speechSynthesis.getVoices();
+                    log(`✓ Voces cargadas: ${voces.length} disponibles.`, "success");
+                    const vocesEs = voces.filter(v => v.lang.startsWith('es'));
+                    if (vocesEs.length > 0) {
+                        log(`Voces en español encontradas: ${vocesEs.length}`, "success");
+                        vocesEs.forEach(v => log(`- ${v.name} (${v.lang})`, "info"));
+                    } else {
+                        log("⚠ No se encontraron voces nativas en español. Se usará el motor por defecto.", "error");
+                    }
+                };
+                
+                // Forzar gatillo manual para iOS
+                window.speechSynthesis.getVoices();
+            } else {
+                log("❌ Tu navegador móvil NO soporta speechSynthesis. Intenta con Chrome o Safari actualizado.", "error");
+            }
+        };
+
+        function intentarHablar() {
+            log("👉 Click/Toque detectado. Iniciando ciclo de desbloqueo de voz...", "info");
+            
+            if (!('speechSynthesis' in window)) {
+                log("❌ Abortando: speechSynthesis no soportado.", "error");
+                return;
+            }
+
+            try {
+                window.speechSynthesis.cancel();
+                
+                const textoPrueba = "Hola, audio desbloqueado correctamente en tu dispositivo móvil.";
+                const utterance = new SpeechSynthesisUtterance(textoPrueba);
                 utterance.lang = 'es-ES';
                 utterance.rate = 1.0;
                 utterance.pitch = 1.0;
 
-                // Buscar una voz en español disponible de forma nativa
+                // Intentar enlazar voz en español
                 const voces = window.speechSynthesis.getVoices();
                 const vozEs = voces.find(v => v.lang.startsWith('es'));
-                if (vozEs) utterance.voice = vozEs;
+                if (vozEs) {
+                    utterance.voice = vozEs;
+                    log(`Usando voz seleccionada: ${vozEs.name}`, "success");
+                }
+
+                utterance.onstart = () => {
+                    log("🔊 ¡ÉXITO! El navegador ha comenzado a emitir el audio de forma física.", "success");
+                };
+
+                utterance.onerror = (event) => {
+                    log(`❌ Error de síntesis: ${event.error}`, "error");
+                };
 
                 window.speechSynthesis.speak(utterance);
-            } else {
-                console.warn("La síntesis de voz no está soportada en este navegador.");
-            }
-        }
+                log("Comando speak enviado al sistema operativo del celular...", "info");
 
-        // Desbloqueo inicial del motor de síntesis de voz requerido por Safari e Chrome Mobile
-        function desbloquearMotorVoz() {
-            if (!motorVozDesbloqueado) {
-                hablar("");
-                motorVozDesbloqueado = true;
-                console.log("Motor de voz desbloqueado exitosamente mediante interacción física.");
-            }
-        }
-
-        async function iniciarCamara() {
-            try {
-                streamActivo = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: "environment" },
-                    audio: false
-                });
-                video.srcObject = streamActivo;
             } catch (err) {
-                console.error("Error al acceder a la cámara:", err);
-                hablar("Error de acceso a la cámara. Por favor permite los permisos.");
+                log(`❌ Excepción capturada: ${err.message}`, "error");
             }
         }
-
-        function gestionarToque() {
-            desbloquearMotorVoz();
-            capturarYEnviar();
-        }
-
-        async function capturarYEnviar() {
-            boton.style.backgroundColor = "#e65100";
-            boton.firstChild.textContent = "PROCESANDO...";
-            instrucciones.textContent = "Capturando imagen y consultando IA...";
-            hablar("Analizando entorno, por favor espera.");
-
-            if (!streamActivo) {
-                await iniciarCamara();
-            }
-
-            const ctx = canvas.getContext('2d');
-            canvas.width = video.videoWidth || 640;
-            canvas.height = video.videoHeight || 480;
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-            canvas.toBlob(async (blob) => {
-                let formData = new FormData();
-                formData.append('imagen', blob, 'captura.jpg');
-
-                try {
-                    const respuesta = await fetch('/analizar_entorno', {
-                        method: 'POST',
-                        body: formData
-                    });
-
-                    const resultado = await respuesta.json();
-                    const respuestaTexto = resultado.mensaje_voz || "Procesamiento completado.";
-
-                    hablar(respuestaTexto);
-
-                    boton.style.backgroundColor = "#1b5e20";
-                    boton.firstChild.textContent = "TOQUE LA PANTALLA";
-                    instrucciones.textContent = "Para volver a analizar tu entorno";
-
-                } catch (err) {
-                    console.error(err);
-                    hablar("Problema de red. Reintente de nuevo.");
-                    boton.style.backgroundColor = "#d84315";
-                    boton.firstChild.textContent = "ERROR DE CONEXIÓN";
-                    instrucciones.textContent = "Toca para reintentar de nuevo";
-                }
-            }, 'image/jpeg');
-        }
-
-        window.onload = () => {
-            iniciarCamara();
-            if ('speechSynthesis' in window) {
-                window.speechSynthesis.getVoices();
-            }
-        };
     </script>
 </body>
 </html>
