@@ -1,260 +1,143 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang='es'>
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Copiloto - Asistente Visual</title>
-  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    
-    body {
-      background-color: #000;
-      color: #fff;
-      font-family: Arial, sans-serif;
-      text-align: center;
-    }
-    
-    #video-container {
-      position: relative;
-      width: 100vw;
-      height: 60vh;
-      overflow: hidden;
-      background-color: #1a1a1a;
-    }
-    
-    video {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-    }
-    
-    canvas { display: none; }
-    
-    #controls {
-      height: 40vh;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      align-items: center;
-      gap: 15px;
-      padding: 20px;
-      background-color: #0a0a0a;
-      overflow-y: auto;
-    }
-    
-    button {
-      width: 90%;
-      max-width: 400px;
-      height: 60px;
-      font-size: 1.1rem;
-      font-weight: bold;
-      background-color: #28a745;
-      color: white;
-      border: none;
-      border-radius: 10px;
-      cursor: pointer;
-    }
-    
-    button:disabled {
-      background-color: #6c757d;
-      cursor: not-allowed;
-    }
-    
-    #status {
-      font-size: 1.1rem;
-      color: #ffc107;
-      font-weight: bold;
-    }
-    
-    #debug-log {
-      font-size: 0.75rem;
-      color: #00ff00;
-      background-color: #111;
-      padding: 10px;
-      border: 1px solid #00ff00;
-      border-radius: 5px;
-      width: 95%;
-      max-width: 500px;
-      max-height: 150px;
-      overflow-y: auto;
-      text-align: left;
-      font-family: monospace;
-    }
-  </style>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>Copiloto - Asistente de un Toque</title>
+    <style>
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            background-color: #121212; font-family: sans-serif; overflow: hidden;
+        }
+        .pantalla-completa {
+            width: 100%; height: 100%; border: none;
+            background-color: #1b5e20; color: white;
+            font-size: 2.2rem; font-weight: bold; text-align: center;
+            display: flex; flex-direction: column; justify-content: center;
+            align-items: center; padding: 20px; box-sizing: border-box;
+            cursor: pointer; transition: background-color 0.2s;
+        }
+        .pantalla-completa:active { background-color: #0b3010; }
+        .subtexto { font-size: 1.1rem; margin-top: 15px; color: #a5d6a7; }
+        #webcam { display: none; }
+    </style>
 </head>
 <body>
-  <div id="video-container">
-    <video id="webcam" autoplay playsinline muted></video>
-    <canvas id="output-canvas"></canvas>
-  </div>
 
-  <div id="controls">
-    <div id="status">Inicializando...</div>
-    <button id="btn-start" onclick="iniciarCopiloto()">INICIAR</button>
-    <button id="btn-stop" onclick="detenerCopiloto()" disabled>DETENER</button>
-    <div id="debug-log"></div>
-  </div>
+    <button class="pantalla-completa" id="botonAccion" onclick="gestionarToque()">
+        TOQUE LA PANTALLA
+        <div class="subtexto" id="instrucciones">PARA ACTIVAR ASISTENCIA DE VOZ</div>
+    </button>
 
-  <script>
-    let session = null;
-    const video = document.getElementById('webcam');
-    const canvas = document.getElementById('output-canvas');
-    const ctx = canvas.getContext('2d');
-    const statusText = document.getElementById('status');
-    const debugLog = document.getElementById('debug-log');
-    const btnStart = document.getElementById('btn-start');
-    const btnStop = document.getElementById('btn-stop');
-    
-    let isRunning = false;
-    let frameCount = 0;
-    const logs = [];
+    <video id="webcam" autoplay playsinline></video>
+    <canvas id="canvas" style="display:none;"></canvas>
 
-    function addLog(msg) {
-      const timestamp = new Date().toLocaleTimeString();
-      logs.push(`[${timestamp}] ${msg}`);
-      debugLog.innerHTML = logs.slice(-10).map(l => l.replace(/</g, '&lt;').replace(/>/g, '&gt;')).join('<br>');
-      debugLog.scrollTop = debugLog.scrollHeight;
-      console.log(msg);
-    }
+    <script>
+        const boton = document.getElementById('botonAccion');
+        const instrucciones = document.getElementById('instrucciones');
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('canvas');
+        let streamActivo = null;
+        let motorVozDesbloqueado = false;
 
-    async function iniciarCopiloto() {
-      if (isRunning) return;
-      
-      statusText.innerText = "Iniciando cámara...";
-      btnStart.disabled = true;
-      logs.length = 0;
-      addLog("🟡 Solicitando acceso a cámara...");
+        // Sistema de audio móvil blindado
+        function hablar(texto) {
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel(); // Detener cualquier reproducción previa
+                const utterance = new SpeechSynthesisUtterance(texto);
+                utterance.lang = 'es-ES';
+                utterance.rate = 1.0;
+                utterance.pitch = 1.0;
+                
+                // Buscar una voz en español disponible de forma nativa
+                const voces = window.speechSynthesis.getVoices();
+                const vozEs = voces.find(v => v.lang.startsWith('es'));
+                if (vozEs) utterance.voice = vozEs;
 
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: "environment" } },
-          audio: false
-        }).catch(() => navigator.mediaDevices.getUserMedia({ video: true }));
-        
-        video.srcObject = stream;
-        addLog("✓ Cámara conectada");
-        
-        await new Promise((resolve) => {
-          video.onloadedmetadata = () => {
-            video.play();
-            addLog(`✓ Video iniciado: ${video.videoWidth}x${video.videoHeight}`);
-            resolve();
-          };
-          setTimeout(resolve, 3000);
-        });
-
-        canvas.width = video.videoWidth || 640;
-        canvas.height = video.videoHeight || 480;
-
-        statusText.innerText = "Cargando modelo...";
-        addLog("🟡 Cargando YOLOv8...");
-        
-        try {
-          session = await ort.InferenceSession.create('./yolov8n.onnx', {
-            executionProviders: ['wasm'],
-          });
-
-          addLog(`✓ Modelo cargado`);
-          addLog(`Input: ${session.inputNames[0]}`);
-          addLog(`Output: ${session.outputNames[0]}`);
-
-          isRunning = true;
-          frameCount = 0;
-          statusText.innerText = "✓ SISTEMA ACTIVO";
-          btnStop.disabled = false;
-          addLog("✓ Iniciando detección...");
-
-          procesarCamara();
-        } catch (modelErr) {
-          statusText.innerText = "Error modelo";
-          addLog(`❌ ${modelErr.message}`);
-          btnStart.disabled = false;
-        }
-      } catch (err) {
-        statusText.innerText = "Error cámara";
-        addLog(`❌ ${err.message}`);
-        btnStart.disabled = false;
-      }
-    }
-
-    function detenerCopiloto() {
-      isRunning = false;
-      if (session) session = null;
-      statusText.innerText = "Detenido";
-      btnStart.disabled = false;
-      btnStop.disabled = true;
-      
-      if (video.srcObject) {
-        video.srcObject.getTracks().forEach(track => track.stop());
-      }
-      addLog("Copiloto detenido");
-    }
-
-    async function procesarCamara() {
-      if (!isRunning || !session) return;
-
-      frameCount++;
-
-      try {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        
-        // Preparar tensor
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = 640;
-        tempCanvas.height = 640;
-        const tempCtx = tempCanvas.getContext('2d');
-        tempCtx.drawImage(video, 0, 0, 640, 640);
-        
-        const imgData = tempCtx.getImageData(0, 0, 640, 640).data;
-        const float32Data = new Float32Array(640 * 640 * 3);
-
-        for (let i = 0; i < 640 * 640; i++) {
-          float32Data[i] = imgData[i * 4] / 255.0;
-          float32Data[i + 640 * 640] = imgData[i * 4 + 1] / 255.0;
-          float32Data[i + 2 * 640 * 640] = imgData[i * 4 + 2] / 255.0;
+                window.speechSynthesis.speak(utterance);
+            } else {
+                console.warn("La síntesis de voz no está soportada en este navegador.");
+            }
         }
 
-        const inputTensor = new ort.Tensor('float32', float32Data, [1, 3, 640, 640]);
-        
-        const feeds = { [session.inputNames[0]]: inputTensor };
-        const results = await session.run(feeds);
-        
-        const outputName = session.outputNames[0];
-        const output = results[outputName];
-
-        if (frameCount === 1) {
-          addLog(`📊 Output dims: [${output.dims.join(', ')}]`);
-          addLog(`📊 Output size: ${output.data.length} valores`);
-          addLog(`📊 Primeros 10 valores: ${Array.from(output.data).slice(0, 10).map(v => v.toFixed(3)).join(', ')}`);
+        // Desbloqueo inicial del motor de síntesis de voz requerido por Safari e Chrome Mobile
+        function desbloquearMotorVoz() {
+            if (!motorVozDesbloqueado) {
+                hablar("");
+                motorVozDesbloqueado = true;
+                console.log("Motor de voz desbloqueado exitosamente mediante interacción física.");
+            }
         }
 
-        // Buscar valores > 0.5
-        let maxVal = 0;
-        let maxIdx = 0;
-        for (let i = 0; i < Math.min(1000, output.data.length); i++) {
-          if (output.data[i] > maxVal) {
-            maxVal = output.data[i];
-            maxIdx = i;
-          }
+        async function iniciarCamara() {
+            try {
+                streamActivo = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: "environment" },
+                    audio: false
+                });
+                video.srcObject = streamActivo;
+            } catch (err) {
+                console.error("Error al acceder a la cámara:", err);
+                hablar("Error de acceso a la cámara. Por favor permite los permisos.");
+            }
         }
 
-        if (frameCount % 30 === 0) {
-          addLog(`Frame ${frameCount}: max=${maxVal.toFixed(4)} en índice ${maxIdx}`);
+        function gestionarToque() {
+            desbloquearMotorVoz();
+            capturarYEnviar();
         }
 
-        inputTensor.dispose();
-      } catch (err) {
-        addLog(`❌ Frame error: ${err.message}`);
-      }
+        async function capturarYEnviar() {
+            boton.style.backgroundColor = "#e65100";
+            boton.firstChild.textContent = "PROCESANDO...";
+            instrucciones.textContent = "Capturando imagen y consultando IA...";
+            hablar("Analizando entorno, por favor espera.");
 
-      requestAnimationFrame(procesarCamara);
-    }
+            if (!streamActivo) {
+                await iniciarCamara();
+            }
 
-    addLog("Ready. Press INICIAR");
-  </script>
+            const ctx = canvas.getContext('2d');
+            canvas.width = video.videoWidth || 640;
+            canvas.height = video.videoHeight || 480;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            canvas.toBlob(async (blob) => {
+                let formData = new FormData();
+                formData.append('imagen', blob, 'captura.jpg');
+
+                try {
+                    const respuesta = await fetch('/analizar_entorno', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    const resultado = await respuesta.json();
+                    const respuestaTexto = resultado.mensaje_voz || "Procesamiento completado.";
+
+                    hablar(respuestaTexto);
+
+                    boton.style.backgroundColor = "#1b5e20";
+                    boton.firstChild.textContent = "TOQUE LA PANTALLA";
+                    instrucciones.textContent = "Para volver a analizar tu entorno";
+
+                } catch (err) {
+                    console.error(err);
+                    hablar("Problema de red. Reintente de nuevo.");
+                    boton.style.backgroundColor = "#d84315";
+                    boton.firstChild.textContent = "ERROR DE CONEXIÓN";
+                    instrucciones.textContent = "Toca para reintentar de nuevo";
+                }
+            }, 'image/jpeg');
+        }
+
+        window.onload = () => {
+            iniciarCamara();
+            // Intentar cargar voces para soporte temprano en algunos dispositivos
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.getVoices();
+            }
+        };
+    </script>
 </body>
 </html>
